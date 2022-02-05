@@ -19,7 +19,6 @@
 package org.apache.flink.streaming.api.transformations;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.eventtime.Watermark;
 import org.apache.flink.api.common.operators.MailboxExecutor;
 import org.apache.flink.api.common.operators.ProcessingTimeService.ProcessingTimeCallback;
@@ -89,8 +88,12 @@ public class SinkV1Adapter<InputT, CommT, WriterStateT, GlobalCommT> implements 
         if (sink.getGlobalCommittableSerializer().isPresent()) {
             globalCommitter = true;
         }
-        if (sink.getCommittableSerializer().isPresent()) {
-            committer = true;
+        try {
+            if (sink.createCommitter().isPresent()) {
+                committer = true;
+            }
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to instantiate committer.", e);
         }
 
         if (globalCommitter && committer && stateful) {
@@ -296,9 +299,7 @@ public class SinkV1Adapter<InputT, CommT, WriterStateT, GlobalCommT> implements 
     }
 
     /** Main class to simulate SinkV1 with SinkV2. */
-    @VisibleForTesting
-    @Internal
-    public class PlainSinkAdapter implements Sink<InputT> {
+    class PlainSinkAdapter implements Sink<InputT> {
         @Override
         public SinkWriterV1Adapter<InputT, CommT, WriterStateT> createWriter(InitContext context)
                 throws IOException {
@@ -360,7 +361,11 @@ public class SinkV1Adapter<InputT, CommT, WriterStateT, GlobalCommT> implements 
 
         @Override
         public void addPostCommitTopology(DataStream<CommittableMessage<CommT>> committables) {
-            StandardSinkTopologies.addGlobalCommitter(committables, GlobalCommitterAdapter::new);
+
+            StandardSinkTopologies.addGlobalCommitter(
+                    committables,
+                    GlobalCommitterAdapter::new,
+                    () -> sink.getCommittableSerializer().get());
         }
     }
 

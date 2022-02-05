@@ -18,285 +18,363 @@
 
 package org.apache.flink.streaming.tests;
 
-import org.apache.flink.api.common.functions.MapFunction;
-import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.RuntimeExecutionMode;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.common.functions.Partitioner;
+import org.apache.flink.api.common.functions.RuntimeContext;
+import org.apache.flink.api.common.serialization.SimpleStringEncoder;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.api.java.io.CsvInputFormat;
 import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer;
-import org.apache.flink.api.java.utils.ParameterTool;
-import org.apache.flink.formats.avro.typeutils.AvroSerializer;
+import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.sink.PrintSinkFunction;
-import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
-import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
-import org.apache.flink.streaming.tests.artificialstate.ComplexPayload;
-import org.apache.flink.streaming.tests.artificialstate.StatefulComplexPayloadSerializer;
-import org.apache.flink.streaming.tests.avro.ComplexPayloadAvro;
-import org.apache.flink.streaming.tests.avro.InnerPayLoadAvro;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.streaming.api.functions.ProcessFunction;
+import org.apache.flink.streaming.api.functions.sink.filesystem.rollingpolicies.DefaultRollingPolicy;
+import org.apache.flink.streaming.api.functions.source.ParallelSourceFunction;
+import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
+import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.applyTumblingWindows;
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.createArtificialKeyedStateMapper;
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.createArtificialOperatorStateMapper;
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.createEventSource;
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.createFailureMapper;
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.createSemanticsCheckMapper;
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.createSlidingWindow;
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.createSlidingWindowCheckMapper;
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.createTimestampExtractor;
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.isSimulateFailures;
-import static org.apache.flink.streaming.tests.DataStreamAllroundTestJobFactory.setupEnvironment;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.EVENT_SOURCE;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.FAILURE_MAPPER_NAME;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.KEYED_STATE_OPER_WITH_AVRO_SER;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.KEYED_STATE_OPER_WITH_KRYO_AND_CUSTOM_SER;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.OPERATOR_STATE_OPER;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.SEMANTICS_CHECK_MAPPER;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.SEMANTICS_CHECK_PRINT_SINK;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.SLIDING_WINDOW_AGG;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.SLIDING_WINDOW_CHECK_MAPPER;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.SLIDING_WINDOW_CHECK_PRINT_SINK;
-import static org.apache.flink.streaming.tests.TestOperatorEnum.TIME_WINDOW_OPER;
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Objects;
 
 /**
- * A general purpose test job for Flink's DataStream API operators and primitives.
+ * Implements the "WordCount" program that computes a simple word occurrence histogram over text
+ * files. This Job can be executed in both streaming and batch execution modes.
  *
- * <p>The job is constructed of generic components from {@link DataStreamAllroundTestJobFactory}. It
- * currently covers the following aspects that are frequently present in Flink DataStream jobs:
+ * <p>The input is a [list of] plain text file[s] with lines separated by a newline character.
+ *
+ * <p>Usage:
  *
  * <ul>
- *   <li>A generic Kryo input type.
- *   <li>A state type for which we register a {@link KryoSerializer}.
- *   <li>Operators with {@link ValueState}.
- *   <li>Operators with union state.
- *   <li>Operators with broadcast state.
+ *   <li><code>--input &lt;path&gt;</code>A list of input files and / or directories to read. If no
+ *       input is provided, the program is run with default data from {@link}.
+ *   <li><code>--discovery-interval &lt;duration&gt;</code>Turns the file reader into a continuous
+ *       source that will monitor the provided input directories every interval and read any new
+ *       files.
+ *   <li><code>--output &lt;path&gt;</code>The output directory where the Job will write the
+ *       results. If no output path is provided, the Job will print the results to <code>stdout
+ *       </code>.
+ *   <li><code>--execution-mode &lt;mode&gt;</code>The execution mode (BATCH, STREAMING, or
+ *       AUTOMATIC) of this pipeline.
  * </ul>
  *
- * <p>The cli job configuration options are described in {@link DataStreamAllroundTestJobFactory}.
+ * <p>This example shows how to:
+ *
+ * <ul>
+ *   <li>Write a simple Flink DataStream program
+ *   <li>Use tuple data types
+ *   <li>Write and use a user-defined function
+ * </ul>
  */
-public class DataStreamAllroundTestProgram {
+public class WordCount {
+
+    // *************************************************************************
+    // PROGRAM
+    // *************************************************************************
 
     public static void main(String[] args) throws Exception {
-        final ParameterTool pt = ParameterTool.fromArgs(args);
 
-        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        class BufferBlockReader {
+            private InputStream input;
+            private long blockSize;
+            private long currentPos;
+            private int cursor;
+            private int bufferSize = 0;
+            private byte[] buffer = new byte[4096]; //4k buffer
+            private ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
+            private List<String> fields = new ArrayList<>();
+            private HashSet<Integer> keptFields = null;
+            private char delimiter;
 
-        setupEnvironment(env, pt);
+            public BufferBlockReader(InputStream input, long blockSize, char delimiter, ArrayList<Object> kept) {
+                this.input = input;
+                this.blockSize = blockSize;
+                this.delimiter = delimiter;
+                ArrayList<Integer> keepIdx = new ArrayList<>();
+                if (kept != null && kept.size() > 0) {
+                    kept.stream().forEach(idx -> keepIdx.add((Integer) idx));
+                    this.keptFields = new HashSet<>(keepIdx);
+                }
+            }
 
-        // add a keyed stateful map operator, which uses Kryo for state serialization
-        DataStream<Event> eventStream =
-                env.addSource(createEventSource(pt))
-                        .name(EVENT_SOURCE.getName())
-                        .uid(EVENT_SOURCE.getUid())
-                        .assignTimestampsAndWatermarks(createTimestampExtractor(pt))
-                        .keyBy(Event::getKey)
-                        .map(
-                                createArtificialKeyedStateMapper(
-                                        // map function simply forwards the inputs
-                                        (MapFunction<Event, Event>) in -> in,
-                                        // state is verified and updated per event as a wrapped
-                                        // ComplexPayload state object
-                                        (Event event, ComplexPayload lastState) -> {
-                                            if (lastState != null
-                                                    && !lastState
-                                                            .getStrPayload()
-                                                            .equals(
-                                                                    KEYED_STATE_OPER_WITH_KRYO_AND_CUSTOM_SER
-                                                                            .getName())
-                                                    && lastState
-                                                                    .getInnerPayLoad()
-                                                                    .getSequenceNumber()
-                                                            == (event.getSequenceNumber() - 1)) {
-                                                throwIncorrectRestoredStateException(
-                                                        (event.getSequenceNumber() - 1),
-                                                        KEYED_STATE_OPER_WITH_KRYO_AND_CUSTOM_SER
-                                                                .getName(),
-                                                        lastState.getStrPayload());
-                                            }
-                                            return new ComplexPayload(
-                                                    event,
-                                                    KEYED_STATE_OPER_WITH_KRYO_AND_CUSTOM_SER
-                                                            .getName());
-                                        },
-                                        Arrays.asList(
-                                                new KryoSerializer<>(
-                                                        ComplexPayload.class,
-                                                        env.getConfig()), // KryoSerializer
-                                                new StatefulComplexPayloadSerializer()), // custom
-                                        // stateful
-                                        // serializer
-                                        Collections.singletonList(
-                                                ComplexPayload.class) // KryoSerializer via type
-                                        // extraction
-                                        ))
-                        .returns(Event.class)
-                        .name(KEYED_STATE_OPER_WITH_KRYO_AND_CUSTOM_SER.getName())
-                        .uid(KEYED_STATE_OPER_WITH_KRYO_AND_CUSTOM_SER.getUid());
+            public String[] readLine() throws IOException {
+                outputStream.reset();
+                fields.clear();
+                int index = 0;
+                while (true) {
+                    if (cursor >= bufferSize) {
+                        fillBuffer();
+                        if (bufferSize == -1) {
+                            if (outputStream.size() > 0) {
+                                fields.add(outputStream.toString());
+                            }
+                            return fields.isEmpty() ? null : fields.toArray(new String[0]);
+                        }
+                    }
+                    int start = cursor;
+                    while (cursor < bufferSize) {
+                        if (buffer[cursor] == delimiter) {
+                            addField(start, index);
+                            outputStream.reset();
+                            start = cursor + 1;
+                            index++;
+                        } else if (buffer[cursor] == '\r' || buffer[cursor] == '\n') {
+                            // If line ended with '\r\n', all the fields will be outputted when buffer[cursor] == '\r'
+                            // And then the cursor will move to '\n' and output Tuple(null) in next readLine() call
+                            // The behavior above is the same for either
+                            // 1. the current buffer keeps '\r\n'
+                            // 2. '\n' comes from the next fillBuffer() call
+                            addField(start, index);
+                            cursor++;
+                            return fields.toArray(new String[0]);
+                        }
+                        cursor++;
+                    }
+                    outputStream.write(buffer, start, bufferSize - start);
+                    currentPos += bufferSize - start;
+                }
+            }
 
-        // add a keyed stateful map operator, which uses Avro for state serialization
-        eventStream =
-                eventStream
-                        .keyBy(Event::getKey)
-                        .map(
-                                createArtificialKeyedStateMapper(
-                                        // map function simply forwards the inputs
-                                        (MapFunction<Event, Event>) in -> in,
-                                        // state is verified and updated per event as a wrapped
-                                        // ComplexPayloadAvro state object
-                                        (Event event, ComplexPayloadAvro lastState) -> {
-                                            if (lastState != null
-                                                    && !lastState
-                                                            .getStrPayload()
-                                                            .equals(
-                                                                    KEYED_STATE_OPER_WITH_AVRO_SER
-                                                                            .getName())
-                                                    && lastState
-                                                                    .getInnerPayLoad()
-                                                                    .getSequenceNumber()
-                                                            == (event.getSequenceNumber() - 1)) {
-                                                throwIncorrectRestoredStateException(
-                                                        (event.getSequenceNumber() - 1),
-                                                        KEYED_STATE_OPER_WITH_AVRO_SER.getName(),
-                                                        lastState.getStrPayload());
-                                            }
+            private void fillBuffer() throws IOException {
+                bufferSize = input.read(buffer);
+                cursor = 0;
+            }
 
-                                            ComplexPayloadAvro payload = new ComplexPayloadAvro();
-                                            payload.setEventTime(event.getEventTime());
-                                            payload.setInnerPayLoad(
-                                                    new InnerPayLoadAvro(
-                                                            event.getSequenceNumber()));
-                                            payload.setStrPayload(
-                                                    KEYED_STATE_OPER_WITH_AVRO_SER.getName());
-                                            payload.setStringList(
-                                                    Arrays.asList(
-                                                            String.valueOf(event.getKey()),
-                                                            event.getPayload()));
 
-                                            return payload;
-                                        },
-                                        Collections.singletonList(
-                                                new AvroSerializer<>(
-                                                        ComplexPayloadAvro
-                                                                .class)), // custom AvroSerializer
-                                        Collections.singletonList(
-                                                ComplexPayloadAvro.class) // AvroSerializer via type
-                                        // extraction
-                                        ))
-                        .returns(Event.class)
-                        .name(KEYED_STATE_OPER_WITH_AVRO_SER.getName())
-                        .uid(KEYED_STATE_OPER_WITH_AVRO_SER.getUid());
+            private void addField(int start, int fieldIndex) {
+                if (keptFields == null || keptFields.contains(fieldIndex)) {
+                    if (cursor - start > 0) {
+                        outputStream.write(buffer, start, cursor - start);
+                        fields.add(outputStream.toString());
+                    } else if (outputStream.size() > 0) {
+                        fields.add(outputStream.toString());
+                    } else {
+                        fields.add(null);
+                    }
+                }
+                currentPos += cursor - start + 1;
+            }
 
-        DataStream<Event> eventStream2 =
-                eventStream
-                        .map(
-                                createArtificialOperatorStateMapper(
-                                        (MapFunction<Event, Event>) in -> in))
-                        .returns(Event.class)
-                        .name(OPERATOR_STATE_OPER.getName())
-                        .uid(OPERATOR_STATE_OPER.getUid());
+            public boolean hasNext() throws IOException {
+                return currentPos <= blockSize && bufferSize != -1;
+            }
 
-        // apply a tumbling window that simply passes forward window elements;
-        // this allows the job to cover timers state
-        @SuppressWarnings("Convert2Lambda")
-        DataStream<Event> eventStream3 =
-                applyTumblingWindows(eventStream2.keyBy(Event::getKey), pt)
-                        .apply(
-                                new WindowFunction<Event, Event, Integer, TimeWindow>() {
-                                    @Override
-                                    public void apply(
-                                            Integer integer,
-                                            TimeWindow window,
-                                            Iterable<Event> input,
-                                            Collector<Event> out) {
-                                        for (Event e : input) {
-                                            out.collect(e);
-                                        }
-                                    }
-                                })
-                        .name(TIME_WINDOW_OPER.getName())
-                        .uid(TIME_WINDOW_OPER.getUid());
-
-        eventStream3 =
-                DataStreamAllroundTestJobFactory.verifyCustomStatefulTypeSerializer(eventStream3);
-
-        if (isSimulateFailures(pt)) {
-            eventStream3 =
-                    eventStream3
-                            .map(createFailureMapper(pt))
-                            .setParallelism(1)
-                            .name(FAILURE_MAPPER_NAME.getName())
-                            .uid(FAILURE_MAPPER_NAME.getUid());
+            public void close() throws IOException {
+                input.close();
+            }
         }
 
-        eventStream3
-                .keyBy(Event::getKey)
-                .flatMap(createSemanticsCheckMapper(pt))
-                .name(SEMANTICS_CHECK_MAPPER.getName())
-                .uid(SEMANTICS_CHECK_MAPPER.getUid())
-                .addSink(new PrintSinkFunction<>())
-                .name(SEMANTICS_CHECK_PRINT_SINK.getName())
-                .uid(SEMANTICS_CHECK_PRINT_SINK.getUid());
+        // final CLI params = CLI.fromArgs(args);
 
-        // Check sliding windows aggregations. Output all elements assigned to a window and later on
-        // check if each event was emitted slide_factor number of times
-        DataStream<Tuple2<Integer, List<Event>>> eventStream4 =
-                eventStream2
-                        .keyBy(Event::getKey)
-                        .window(createSlidingWindow(pt))
-                        .apply(
-                                new WindowFunction<
-                                        Event,
-                                        Tuple2<Integer, List<Event>>,
-                                        Integer,
-                                        TimeWindow>() {
-                                    private static final long serialVersionUID =
-                                            3166250579972849440L;
+        // Create the execution environment. This is the main entrypoint
+        // to building a Flink application.
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-                                    @Override
-                                    public void apply(
-                                            Integer key,
-                                            TimeWindow window,
-                                            Iterable<Event> input,
-                                            Collector<Tuple2<Integer, List<Event>>> out) {
+        // Apache Flink’s unified approach to stream and batch processing means that a DataStream
+        // application executed over bounded input will produce the same final results regardless
+        // of the configured execution mode. It is important to note what final means here: a job
+        // executing in STREAMING mode might produce incremental updates (think upserts in
+        // a database) while in BATCH mode, it would only produce one final result at the end. The
+        // final result will be the same if interpreted correctly, but getting there can be
+        // different.
+        //
+        // The “classic” execution behavior of the DataStream API is called STREAMING execution
+        // mode. Applications should use streaming execution for unbounded jobs that require
+        // continuous incremental processing and are expected to stay online indefinitely.
+        //
+        // By enabling BATCH execution, we allow Flink to apply additional optimizations that we
+        // can only do when we know that our input is bounded. For example, different
+        // join/aggregation strategies can be used, in addition to a different shuffle
+        // implementation that allows more efficient task scheduling and failure recovery behavior.
+        //
+        // By setting the runtime mode to AUTOMATIC, Flink will choose BATCH if all sources
+        // are bounded and otherwise STREAMING.
+        env.setRuntimeMode(RuntimeExecutionMode.STREAMING);
 
-                                        out.collect(
-                                                Tuple2.of(
-                                                        key,
-                                                        StreamSupport.stream(
-                                                                        input.spliterator(), false)
-                                                                .collect(Collectors.toList())));
-                                    }
-                                })
-                        .name(SLIDING_WINDOW_AGG.getName())
-                        .uid(SLIDING_WINDOW_AGG.getUid());
+        // This optional step makes the input parameters
+        // available in the Flink UI.
+        // env.getConfig().setGlobalJobParameters(params);
 
-        eventStream4
-                .keyBy(events -> events.f0)
-                .flatMap(createSlidingWindowCheckMapper(pt))
-                .name(SLIDING_WINDOW_CHECK_MAPPER.getName())
-                .uid(SLIDING_WINDOW_CHECK_MAPPER.getUid())
-                .addSink(new PrintSinkFunction<>())
-                .name(SLIDING_WINDOW_CHECK_PRINT_SINK.getName())
-                .uid(SLIDING_WINDOW_CHECK_PRINT_SINK.getUid());
+        int sourceParallelism = 1;
+        int filterParallelism = 1;
+        int aggregateParallelism = 1;
+        int sinkParallelism = 1;
 
-        env.execute("General purpose test job");
+        abstract class MySource implements ParallelSourceFunction<String[]>, CheckpointedFunction{}
+
+        String path = "hdfs://10.128.0.10:8020/tpch-30G/orders.tbl";
+        DataStream<String[]> dynamicSource = env.readTextFile(path).process(new ProcessFunction<String, String[]>() {
+            @Override
+            public void processElement(
+                    String value,
+                    ProcessFunction<String, String[]>.Context ctx,
+                    Collector<String[]> out) throws Exception {
+                out.collect(value.split("\\|"));
+            }
+        }).setParallelism(sourceParallelism);
+
+
+//        DataStream<String[]> dynamicSource = env.addSource(new RichParallelSourceFunction<String[]>(){
+//            FSDataInputStream stream = null;
+//            long blockSize = 0;
+//            long startOffset = 0;
+//
+//            @Override
+//            public void setRuntimeContext(RuntimeContext t) {
+//                super.setRuntimeContext(t);
+//                try {
+//                    System.out.println("start init");
+//                    Configuration conf = new Configuration();
+//                    FileSystem fs2 = FileSystem.get(new URI("hdfs://10.128.0.10:8020"),conf);
+//                    Long totalBytes = fs2.getFileStatus(new Path("/tpch-30G/orders.tbl")).getLen();
+//                    stream = fs2.open(new Path("/tpch-30G/orders.tbl"));
+//                    startOffset = totalBytes / sourceParallelism * t.getIndexOfThisSubtask();
+//                    stream.seek(startOffset);
+//                    if (t.getIndexOfThisSubtask() != sourceParallelism - 1){
+//                        blockSize = (totalBytes / sourceParallelism * (t.getIndexOfThisSubtask() + 1))-startOffset;
+//                    } else{
+//                        blockSize = totalBytes-startOffset;
+//                    }
+//                }catch(Exception e){
+//                    e.printStackTrace();
+//                }
+//            }
+//
+//            @Override
+//            public void run(SourceContext<String[]> ctx) throws Exception {
+//                System.out.println("start reading");
+//                String l = stream.readLine();
+//                System.out.println("end reading content = "+l);
+//                BufferBlockReader reader = new BufferBlockReader(stream, blockSize,'|',null);
+//                if(startOffset !=0) reader.readLine();
+//                String line = stream.readLine();
+//                System.out.println(line);
+//                while(reader.hasNext())   {
+//                    String[] arr = reader.readLine();
+//                    ctx.collect(arr);
+//                }
+//                reader.close();
+////                for(int i = 0; i<1000; ++i){
+////                    ctx.collect(new String[]{String.valueOf(i),String.valueOf(i)});
+////                }
+//                ctx.emitWatermark(new Watermark(999));
+//            }
+//
+//            @Override
+//            public void cancel() {
+//
+//            }
+//        }).setParallelism(sourceParallelism);
+
+        SingleOutputStreamOperator<String[]> filter = dynamicSource.filter(new FilterFunction<String[]>() {
+            @Override
+            public boolean filter(String[] value) throws Exception {
+                return Objects.equals(value[1], "F");
+            }
+        }).setParallelism(filterParallelism);
+        filter.partitionCustom(new Partitioner<String>() {
+            @Override
+            public int partition(String key, int numPartitions) {
+                return key.hashCode();
+            }
+        },new KeySelector<String[], String>() {
+
+            @Override
+            public String getKey(String[] value) throws Exception {
+                return value[1];
+            }
+        }).process(new ProcessFunction<String[], Integer>() {
+
+            int count = 0;
+
+            @Override
+            public void processElement(
+                    String[] value,
+                    ProcessFunction<String[], Integer>.Context ctx,
+                    Collector<Integer> out) throws Exception {
+                count++;
+            }
+
+            @Override
+            public void onTimer(
+                    long timestamp,
+                    ProcessFunction<String[], Integer>.OnTimerContext ctx,
+                    Collector<Integer> out) throws Exception {
+                super.onTimer(timestamp, ctx, out);
+                if(timestamp == 999) out.collect(count);
+            }
+
+        }).setParallelism(aggregateParallelism).process(new ProcessFunction<Integer, Integer>() {
+            int sum = 0;
+            int seen = 0;
+            @Override
+            public void processElement(
+                    Integer value,
+                    ProcessFunction<Integer, Integer>.Context ctx,
+                    Collector<Integer> out) throws Exception {
+                seen++;
+                sum += value;
+                if(seen == aggregateParallelism){
+                    out.collect(sum);
+                }
+            }
+        }).setParallelism(1).print();
+
+        // Apache Flink applications are composed lazily. Calling execute
+        // submits the Job and begins processing.
+        env.execute("workflow");
     }
 
-    private static void throwIncorrectRestoredStateException(
-            long sequenceNumber, String expectedPayload, String actualPayload) throws Exception {
-        throw new Exception(
-                "State is set or restored incorrectly: "
-                        + "sequenceNumber = "
-                        + sequenceNumber
-                        + ", expectedPayload = "
-                        + expectedPayload
-                        + ", actualPayload = "
-                        + actualPayload);
+    // *************************************************************************
+    // USER FUNCTIONS
+    // *************************************************************************
+
+    /**
+     * Implements the string tokenizer that splits sentences into words as a user-defined
+     * FlatMapFunction. The function takes a line (String) and splits it into multiple pairs in the
+     * form of "(word,1)" ({@code Tuple2<String, Integer>}).
+     */
+    public static final class Tokenizer
+            implements FlatMapFunction<String, Tuple2<String, Integer>> {
+
+        @Override
+        public void flatMap(String value, Collector<Tuple2<String, Integer>> out) {
+            // normalize and split the line
+            String[] tokens = value.toLowerCase().split("\\W+");
+
+            // emit the pairs
+            for (String token : tokens) {
+                if (token.length() > 0) {
+                    out.collect(new Tuple2<>(token, 1));
+                }
+            }
+        }
     }
 }
+

@@ -163,7 +163,7 @@ public class WordCount {
         // available in the Flink UI.
         // env.getConfig().setGlobalJobParameters(params);
 
-        int sourceParallelism = 6;
+        int sourceParallelism = 12;
         int filterParallelism = 12;
         int aggregateParallelism = 12;
 
@@ -192,9 +192,9 @@ public class WordCount {
         SingleOutputStreamOperator<String[]> filter = dynamicSource.filter(new FilterFunction<String[]>() {
             @Override
             public boolean filter(String[] value) throws Exception {
-                List<String> keywords =  Arrays.asList("asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS");
+                /*List<String> keywords =  Arrays.asList("asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS");
                 int countNum = 0;
-                for(int k=0;k < 50;++k) {
+                for(int k=0;k < 20;++k) {
                     for (int i = 0; i < keywords.size(); i++) {
                         if (keywords.get(i).contains(value[2])) {
                             countNum++;
@@ -203,7 +203,7 @@ public class WordCount {
                 }
                 if(countNum > 23) {
                     System.out.println("More than 23");
-                }
+                }*/
                 return Objects.equals(value[2], "F");
             }
         }).setParallelism(filterParallelism).disableChaining();

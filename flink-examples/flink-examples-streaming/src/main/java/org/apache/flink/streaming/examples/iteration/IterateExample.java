@@ -17,7 +17,10 @@
 
 package org.apache.flink.streaming.examples.iteration;
 
+import org.apache.flink.api.common.RuntimeExecutionMode;
+import org.apache.flink.api.common.functions.FilterFunction;
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.Partitioner;
 import org.apache.flink.api.common.serialization.SimpleStringEncoder;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple5;
@@ -32,10 +35,15 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.streaming.api.functions.sink.filesystem.rollingpolicies.DefaultRollingPolicy;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
+import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
 
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Objects;
 import java.util.Random;
 
 /**
@@ -54,176 +62,81 @@ import java.util.Random;
  */
 public class IterateExample {
 
-    private static final int BOUND = 100;
+//    private static List<String> tags = Arrays.asList("1","1","1","1","1","1","2","3","4","5","6","7","8","9","10","11","12");
+    private static List<String> tags = Arrays.asList("1","1","2","3","4","5","6","7","8","9","10","11","12","13","13","14","14");
+    private static Integer currentTagIdx = 0;
 
-    private static final OutputTag<Tuple5<Integer, Integer, Integer, Integer, Integer>>
-            ITERATE_TAG =
-                    new OutputTag<Tuple5<Integer, Integer, Integer, Integer, Integer>>(
-                            "iterate") {};
+    private static String getNextTag() {
+        if(currentTagIdx>=tags.size()) {currentTagIdx = 0;}
+        String ret = tags.get(currentTagIdx);
+        currentTagIdx++;
+        return ret;
+    }
 
-    // *************************************************************************
-    // PROGRAM
-    // *************************************************************************
+    public static class KeyPartitioner implements Partitioner<Integer> {
+        @Override
+        public int partition(Integer key, int numPartitions) {
+            return key % numPartitions;
+        }
+    }
+
 
     public static void main(String[] args) throws Exception {
 
-        // Checking input parameters
-        final ParameterTool params = ParameterTool.fromArgs(args);
+        //final ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
 
-        // set up input for the stream of integer pairs
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setRuntimeMode(RuntimeExecutionMode.STREAMING);
 
-        // obtain execution environment and set setBufferTimeout to 1 to enable
-        // continuous flushing of the output buffers (lowest latency)
-        StreamExecutionEnvironment env =
-                StreamExecutionEnvironment.getExecutionEnvironment().setBufferTimeout(1);
+        int sourceParallelism = 2;
+        int filterParallelism = 12;
+        int aggregateParallelism = 1;
 
-        // make parameters available in the web interface
-        env.getConfig().setGlobalJobParameters(params);
+        abstract class MyAggregate  extends AbstractStreamOperator<Long> implements OneInputStreamOperator<String[], Long> {}
 
-        // create input stream of integer pairs
-        DataStream<Tuple2<Integer, Integer>> inputStream;
-        if (params.has("input")) {
-            inputStream = env.readTextFile(params.get("input")).map(new FibonacciInputMap());
-        } else {
-            System.out.println("Executing Iterate example with default input data set.");
-            System.out.println("Use --input to specify file input.");
-            inputStream = env.addSource(new RandomFibonacciSource());
-        }
-
-        // create an iterative data stream from the input with 5 second timeout
-        IterativeStream<Tuple5<Integer, Integer, Integer, Integer, Integer>> it =
-                inputStream.map(new InputMap()).iterate(5000L);
-
-        // apply the step function to get the next Fibonacci number
-        // increment the counter and split the output
-        SingleOutputStreamOperator<Tuple5<Integer, Integer, Integer, Integer, Integer>> step =
-                it.process(new Step());
-
-        // close the iteration by selecting the tuples that were directed to the
-        // 'iterate' channel in the output selector
-        it.closeWith(step.getSideOutput(ITERATE_TAG));
-
-        // to produce the final get the input pairs that have the greatest iteration counter
-        // on a 1 second sliding window
-        DataStream<Tuple2<Tuple2<Integer, Integer>, Integer>> numbers = step.map(new OutputMap());
-
-        // emit results
-        if (params.has("output")) {
-            numbers.sinkTo(
-                    FileSink.<Tuple2<Tuple2<Integer, Integer>, Integer>>forRowFormat(
-                                    new Path(params.get("output")), new SimpleStringEncoder<>())
-                            .withRollingPolicy(
-                                    DefaultRollingPolicy.builder()
-                                            .withMaxPartSize(MemorySize.ofMebiBytes(1))
-                                            .withRolloverInterval(Duration.ofSeconds(10))
-                                            .build())
-                            .build());
-        } else {
-            System.out.println("Printing result to stdout. Use --output to specify output path.");
-            numbers.print();
-        }
-
-        // execute the program
-        env.execute("Streaming Iteration Example");
-    }
-
-    // *************************************************************************
-    // USER FUNCTIONS
-    // *************************************************************************
-
-    /** Generate BOUND number of random integer pairs from the range from 1 to BOUND/2. */
-    private static class RandomFibonacciSource implements SourceFunction<Tuple2<Integer, Integer>> {
-        private static final long serialVersionUID = 1L;
-
-        private Random rnd = new Random();
-
-        private volatile boolean isRunning = true;
-        private int counter = 0;
-
-        @Override
-        public void run(SourceContext<Tuple2<Integer, Integer>> ctx) throws Exception {
-
-            while (isRunning && counter < BOUND) {
-                int first = rnd.nextInt(BOUND / 2 - 1) + 1;
-                int second = rnd.nextInt(BOUND / 2 - 1) + 1;
-
-                ctx.collect(new Tuple2<>(first, second));
-                counter++;
-                Thread.sleep(50L);
+        String path = "hdfs://10.128.0.25:8020/tpch-30G/orders.tbl";
+        DataStream<String[]> dynamicSource = env.readTextFile(path).setParallelism(15).process(new ProcessFunction<String, String[]>() {
+            boolean first = false;
+            @Override
+            public void processElement(
+                    String value,
+                    ProcessFunction<String, String[]>.Context ctx,
+                    Collector<String[]> out) throws Exception {
+                if(!first){
+                    System.out.println(Arrays.toString(value.split("\\|")));
+                    first=true;
+                }
+                try{
+                    String[] cols = value.split("\\|");
+                    cols[0] = getNextTag();
+                    out.collect(cols);
+                }catch (Exception e){
+                    System.out.println("Error: "+Arrays.toString(value.split("\\|")));
+                }
             }
-        }
+        }).setParallelism(15).partitionCustom(new KeyPartitioner(), value -> Integer.parseInt(value[0]));
 
-        @Override
-        public void cancel() {
-            isRunning = false;
-        }
-    }
-
-    /** Generate random integer pairs from the range from 0 to BOUND/2. */
-    private static class FibonacciInputMap
-            implements MapFunction<String, Tuple2<Integer, Integer>> {
-        private static final long serialVersionUID = 1L;
-
-        @Override
-        public Tuple2<Integer, Integer> map(String value) throws Exception {
-            String record = value.substring(1, value.length() - 1);
-            String[] splitted = record.split(",");
-            return new Tuple2<>(Integer.parseInt(splitted[0]), Integer.parseInt(splitted[1]));
-        }
-    }
-
-    /**
-     * Map the inputs so that the next Fibonacci numbers can be calculated while preserving the
-     * original input tuple. A counter is attached to the tuple and incremented in every iteration
-     * step.
-     */
-    public static class InputMap
-            implements MapFunction<
-                    Tuple2<Integer, Integer>, Tuple5<Integer, Integer, Integer, Integer, Integer>> {
-        private static final long serialVersionUID = 1L;
-
-        @Override
-        public Tuple5<Integer, Integer, Integer, Integer, Integer> map(
-                Tuple2<Integer, Integer> value) throws Exception {
-            return new Tuple5<>(value.f0, value.f1, value.f0, value.f1, 0);
-        }
-    }
-
-    /** Iteration step function that calculates the next Fibonacci number. */
-    public static class Step
-            extends ProcessFunction<
-                    Tuple5<Integer, Integer, Integer, Integer, Integer>,
-                    Tuple5<Integer, Integer, Integer, Integer, Integer>> {
-        private static final long serialVersionUID = 1L;
-
-        @Override
-        public void processElement(
-                Tuple5<Integer, Integer, Integer, Integer, Integer> value,
-                Context ctx,
-                Collector<Tuple5<Integer, Integer, Integer, Integer, Integer>> out)
-                throws Exception {
-            Tuple5<Integer, Integer, Integer, Integer, Integer> element =
-                    new Tuple5<>(value.f0, value.f1, value.f3, value.f2 + value.f3, ++value.f4);
-
-            if (value.f2 < BOUND && value.f3 < BOUND) {
-                ctx.output(ITERATE_TAG, element);
-            } else {
-                out.collect(element);
+        dynamicSource.filter(new FilterFunction<String[]>() {
+            @Override
+            public boolean filter(String[] value) throws Exception {
+                List<String> keywords =  Arrays.asList("asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS");
+                int countNum = 0;
+                for(int k=0;k < 50;++k) {
+                    for (int i = 0; i < keywords.size(); i++) {
+                        if (keywords.get(i).contains(value[1]+k)) {
+                            countNum++;
+                        }
+                    }
+                }
+                if(countNum > 23) {
+                    System.out.println("More than 23");
+                }
+                return Objects.equals(value[2], "F23");
             }
-        }
-    }
+        }).setParallelism(15).print();
 
-    /** Giving back the input pair and the counter. */
-    public static class OutputMap
-            implements MapFunction<
-                    Tuple5<Integer, Integer, Integer, Integer, Integer>,
-                    Tuple2<Tuple2<Integer, Integer>, Integer>> {
-        private static final long serialVersionUID = 1L;
-
-        @Override
-        public Tuple2<Tuple2<Integer, Integer>, Integer> map(
-                Tuple5<Integer, Integer, Integer, Integer, Integer> value) throws Exception {
-            return new Tuple2<>(new Tuple2<>(value.f0, value.f1), value.f4);
-        }
+        // Apache Flink applications are composed lazily. Calling execute
+        // submits the Job and begins processing.
+        env.execute("workflow");
     }
 }

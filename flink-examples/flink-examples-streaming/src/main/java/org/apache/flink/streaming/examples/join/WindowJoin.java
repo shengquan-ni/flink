@@ -17,6 +17,7 @@
 
 package org.apache.flink.streaming.examples.join;
 
+import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.api.common.eventtime.AscendingTimestampsWatermarks;
 import org.apache.flink.api.common.eventtime.TimestampAssigner;
 import org.apache.flink.api.common.eventtime.TimestampAssignerSupplier;
@@ -24,16 +25,23 @@ import org.apache.flink.api.common.eventtime.WatermarkGenerator;
 import org.apache.flink.api.common.eventtime.WatermarkGeneratorSupplier;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.JoinFunction;
+import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.ProcessFunction;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.streaming.examples.join.WindowJoinSampleData.GradeSource;
 import org.apache.flink.streaming.examples.join.WindowJoinSampleData.SalarySource;
+import org.apache.flink.util.Collector;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 /**
  * Example illustrating a windowed stream join between two data streams.
@@ -51,37 +59,45 @@ public class WindowJoin {
     // *************************************************************************
 
     public static void main(String[] args) throws Exception {
-        // parse the parameters
-        final ParameterTool params = ParameterTool.fromArgs(args);
-        final long windowSize = params.getLong("windowSize", 2000);
-        final long rate = params.getLong("rate", 3L);
+        // with Table API in batch mode and global parallelism 12. Sort -> 1 worker, but aggregate -> 12 workers
+        // set up the Java DataStream API
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-        System.out.println("Using windowSize=" + windowSize + ", data rate=" + rate);
-        System.out.println(
-                "To customize example, use: WindowJoin [--windowSize <window-size-in-millis>] [--rate <elements-per-second>]");
+        // set up the Java Table API
+        env.setRuntimeMode(RuntimeExecutionMode.BATCH);
+        String path = "hdfs://10.128.0.10:8020/dsb-30G/customer.dat";
+        DataStream<Tuple2<List<String>,String>> dynamicSource = env.readTextFile(path).setParallelism(12).process(new ProcessFunction<String, Tuple2<List<String>,String>>() {
+            boolean first = false;
+            @Override
+            public void processElement(
+                    String value,
+                    ProcessFunction<String, Tuple2<List<String>,String>>.Context ctx,
+                    Collector<Tuple2<List<String>,String>> out) throws Exception {
+                if(!first){
+                    System.out.println(Arrays.toString(value.split("\\|")));
+                    first=true;
+                }
+                try{
 
-        // obtain execution environment, run this example in "ingestion time"
-        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+                    out.collect(new Tuple2<>(Arrays.asList(value.split("\\|")[0]),value.split("\\|")[1]));
+                }catch (Exception e){
+                    System.out.println("Error:"+e.getMessage());
+                    System.out.println("Error: "+Arrays.toString(value.split("\\|")));
+                }
+            }
+        }).setParallelism(12);
+        DataStream<Tuple2<List<String>,String>> sortoutput = dynamicSource.keyBy(x->x.f1).reduce(
+                new ReduceFunction<Tuple2<List<String>, String>>() {
+                    @Override
+                    public Tuple2<List<String>, String> reduce(
+                            Tuple2<List<String>, String> value1,
+                            Tuple2<List<String>, String> value2) throws Exception {
+                        return new Tuple2<>(Arrays.asList("sds"),value2.f1);
+                    }
+                }
+        );
 
-        // make parameters available in the web interface
-        env.getConfig().setGlobalJobParameters(params);
-
-        // create the data sources for both grades and salaries
-        DataStream<Tuple2<String, Integer>> grades =
-                GradeSource.getSource(env, rate)
-                        .assignTimestampsAndWatermarks(IngestionTimeWatermarkStrategy.create());
-
-        DataStream<Tuple2<String, Integer>> salaries =
-                SalarySource.getSource(env, rate)
-                        .assignTimestampsAndWatermarks(IngestionTimeWatermarkStrategy.create());
-
-        // run the actual window join program
-        // for testability, this functionality is in a separate method.
-        DataStream<Tuple3<String, Integer, Integer>> joinedStream =
-                runWindowJoin(grades, salaries, windowSize);
-
-        // print the results with a single thread, rather than in parallel
-        joinedStream.print().setParallelism(1);
+        sortoutput.print();
 
         // execute program
         env.execute("Windowed Join Example");

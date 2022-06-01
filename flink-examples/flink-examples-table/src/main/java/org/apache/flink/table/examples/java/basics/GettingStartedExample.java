@@ -18,15 +18,19 @@
 
 package org.apache.flink.table.examples.java.basics;
 
+import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.table.api.EnvironmentSettings;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
 import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
 import org.apache.flink.util.CloseableIterator;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import static org.apache.flink.table.api.Expressions.$;
@@ -63,6 +67,7 @@ public final class GettingStartedExample {
         final EnvironmentSettings settings =
                 EnvironmentSettings.newInstance().inBatchMode().build();
         final TableEnvironment env = TableEnvironment.create(settings);
+        env.getConfig().getConfiguration().setString("table.exec.resource.default-parallelism","4");
 
         // create a table with example data without a connector required
         final Table rawCustomers =
@@ -132,10 +137,225 @@ public final class GettingStartedExample {
                                 true,
                                 0,
                                 78,
+                                3),
+                        Row.of(
+                                "Guillermo Smith",
+                                LocalDate.parse("1992-12-12"),
+                                "4081 Valley Road",
+                                "08540",
+                                "New Jersey",
+                                "m",
+                                true,
+                                0,
+                                78,
+                                3),
+                        Row.of(
+                                "Valeria Mendoza",
+                                LocalDate.parse("1970-03-28"),
+                                "1239  Rainbow Road",
+                                "90017",
+                                "Los Angeles",
+                                "f",
+                                true,
+                                9,
+                                39,
+                                0),
+                        Row.of(
+                                "Leann Holloway",
+                                LocalDate.parse("1989-05-21"),
+                                "2359 New Street",
+                                "97401",
+                                "Eugene",
+                                null,
+                                true,
+                                null,
+                                null,
+                                null),
+                        Row.of(
+                                "Brandy Sanders",
+                                LocalDate.parse("1956-05-26"),
+                                "4891 Walkers-Ridge-Way",
+                                "73119",
+                                "Oklahoma City",
+                                "m",
+                                false,
+                                9,
+                                39,
+                                0),
+                        Row.of(
+                                "John Turner",
+                                LocalDate.parse("1982-10-02"),
+                                "2359 New Street",
+                                "60605",
+                                "Chicago",
+                                "m",
+                                true,
+                                12,
+                                39,
+                                0),
+                        Row.of(
+                                "Ellen Ortega",
+                                LocalDate.parse("1985-06-18"),
+                                "2448 Rodney STreet",
+                                "85023",
+                                "Phoenix",
+                                "f",
+                                true,
+                                0,
+                                78,
+                                3),
+                        Row.of(
+                                "Guillermo Smith",
+                                LocalDate.parse("1992-12-12"),
+                                "4081 Valley Road",
+                                "08540",
+                                "New Jersey",
+                                "m",
+                                true,
+                                0,
+                                78,
+                                3),
+                        Row.of(
+                                "Valeria Mendoza",
+                                LocalDate.parse("1970-03-28"),
+                                "1239  Rainbow Road",
+                                "90017",
+                                "Los Angeles",
+                                "f",
+                                true,
+                                9,
+                                39,
+                                0),
+                        Row.of(
+                                "Leann Holloway",
+                                LocalDate.parse("1989-05-21"),
+                                "2359 New Street",
+                                "97401",
+                                "Eugene",
+                                null,
+                                true,
+                                null,
+                                null,
+                                null),
+                        Row.of(
+                                "Brandy Sanders",
+                                LocalDate.parse("1956-05-26"),
+                                "4891 Walkers-Ridge-Way",
+                                "73119",
+                                "Oklahoma City",
+                                "m",
+                                false,
+                                9,
+                                39,
+                                0),
+                        Row.of(
+                                "John Turner",
+                                LocalDate.parse("1982-10-02"),
+                                "2359 New Street",
+                                "60605",
+                                "Chicago",
+                                "m",
+                                true,
+                                12,
+                                39,
+                                0),
+                        Row.of(
+                                "Ellen Ortega",
+                                LocalDate.parse("1985-06-18"),
+                                "2448 Rodney STreet",
+                                "85023",
+                                "Phoenix",
+                                "f",
+                                true,
+                                0,
+                                78,
+                                3),
+                        Row.of(
+                                "Guillermo Smith",
+                                LocalDate.parse("1992-12-12"),
+                                "4081 Valley Road",
+                                "08540",
+                                "New Jersey",
+                                "m",
+                                true,
+                                0,
+                                78,
+                                3),
+                        Row.of(
+                                "Valeria Mendoza",
+                                LocalDate.parse("1970-03-28"),
+                                "1239  Rainbow Road",
+                                "90017",
+                                "Los Angeles",
+                                "f",
+                                true,
+                                9,
+                                39,
+                                0),
+                        Row.of(
+                                "Leann Holloway",
+                                LocalDate.parse("1989-05-21"),
+                                "2359 New Street",
+                                "97401",
+                                "Eugene",
+                                null,
+                                true,
+                                null,
+                                null,
+                                null),
+                        Row.of(
+                                "Brandy Sanders",
+                                LocalDate.parse("1956-05-26"),
+                                "4891 Walkers-Ridge-Way",
+                                "73119",
+                                "Oklahoma City",
+                                "m",
+                                false,
+                                9,
+                                39,
+                                0),
+                        Row.of(
+                                "John Turner",
+                                LocalDate.parse("1982-10-02"),
+                                "2359 New Street",
+                                "60605",
+                                "Chicago",
+                                "m",
+                                true,
+                                12,
+                                39,
+                                0),
+                        Row.of(
+                                "Ellen Ortega",
+                                LocalDate.parse("1985-06-18"),
+                                "2448 Rodney STreet",
+                                "85023",
+                                "Phoenix",
+                                "f",
+                                true,
+                                0,
+                                78,
                                 3));
 
+        Table result = rawCustomers.orderBy($("f7").asc());
+
+        System.out.println("THE SORTED OUTPUT BY AVINASH IS ");
+        result.execute().print();
+        /*try (CloseableIterator<Row> iterator = result.execute().collect()) {
+            final List<Row> materializedUpdates = new ArrayList<>();
+            iterator.forEachRemaining(
+                    row -> {
+                                materializedUpdates.add(row);
+                        }
+                    );
+            // show the final output table if the result is bounded,
+            // the output should exclude San Antonio because it has a smaller population than
+            // Houston or Dallas in Texas (TX)
+            materializedUpdates.forEach(System.out::println);
+        }*/
+
         // handle ranges of columns easily
-        final Table truncatedCustomers = rawCustomers.select(withColumns(range(1, 7)));
+        /*final Table truncatedCustomers = rawCustomers.select(withColumns(range(1, 7)));
 
         // name columns
         final Table namedCustomers =
@@ -202,7 +422,8 @@ public final class GettingStartedExample {
             } else {
                 System.out.println("FAILURE!");
             }
-        }
+        }*/
+
     }
 
     /**

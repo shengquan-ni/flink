@@ -63,7 +63,8 @@ import java.util.Random;
 public class IterateExample {
 
 //    private static List<String> tags = Arrays.asList("1","1","1","1","1","1","2","3","4","5","6","7","8","9","10","11","12");
-    private static List<String> tags = Arrays.asList("1","1","2","3","4","5","6","7","8","9","10","11","12","13","13","14","14");
+//    private static List<String> tags = Arrays.asList("1","1","2","3","4","5","6","7","8","9","10","11","12","13","13","14","14");
+private static List<String> tags = Arrays.asList("1","2","3","4","5","6","7","8","9","10","11","12");
     private static Integer currentTagIdx = 0;
 
     private static String getNextTag() {
@@ -95,7 +96,7 @@ public class IterateExample {
         abstract class MyAggregate  extends AbstractStreamOperator<Long> implements OneInputStreamOperator<String[], Long> {}
 
         String path = "hdfs://10.128.0.25:8020/tpch-30G/orders.tbl";
-        DataStream<String[]> dynamicSource = env.readTextFile(path).setParallelism(15).process(new ProcessFunction<String, String[]>() {
+        DataStream<String[]> dynamicSource = env.readTextFile(path).setParallelism(6).process(new ProcessFunction<String, String[]>() {
             boolean first = false;
             @Override
             public void processElement(
@@ -114,14 +115,33 @@ public class IterateExample {
                     System.out.println("Error: "+Arrays.toString(value.split("\\|")));
                 }
             }
-        }).setParallelism(15).partitionCustom(new KeyPartitioner(), value -> Integer.parseInt(value[0]));
+        }).setParallelism(6).partitionCustom(new KeyPartitioner(), value -> Integer.parseInt(value[0]));
 
-        dynamicSource.filter(new FilterFunction<String[]>() {
+        DataStream<String[]> filter1 = dynamicSource.filter(new FilterFunction<String[]>() {
             @Override
             public boolean filter(String[] value) throws Exception {
                 List<String> keywords =  Arrays.asList("asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS");
                 int countNum = 0;
-                for(int k=0;k < 50;++k) {
+                for(int k=0;k < 30;++k) {
+                    for (int i = 0; i < keywords.size(); i++) {
+                        if (keywords.get(i).contains(value[1]+k)) {
+                            countNum++;
+                        }
+                    }
+                }
+                if(countNum > 23) {
+                    System.out.println("More than 23");
+                }
+                return true;
+            }
+        }).setParallelism(6).partitionCustom(new KeyPartitioner(), value -> Integer.parseInt(value[0])+2);
+
+        filter1.filter(new FilterFunction<String[]>() {
+            @Override
+            public boolean filter(String[] value) throws Exception {
+                List<String> keywords =  Arrays.asList("asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS","asda","SFSD","DFSD","FDFDS");
+                int countNum = 0;
+                for(int k=0;k < 32;++k) {
                     for (int i = 0; i < keywords.size(); i++) {
                         if (keywords.get(i).contains(value[1]+k)) {
                             countNum++;
@@ -133,7 +153,7 @@ public class IterateExample {
                 }
                 return Objects.equals(value[2], "F23");
             }
-        }).setParallelism(15).print();
+        }).setParallelism(6).print();
 
         // Apache Flink applications are composed lazily. Calling execute
         // submits the Job and begins processing.
